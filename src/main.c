@@ -3,6 +3,8 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/drivers/uart.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 
 
@@ -43,24 +45,39 @@ static uint8_t i2c_data_buffer[2];
 static uint8_t i2c_buffer[2];
 
 uint8_t set_gpios_to_output();
-
-
 void print_uart(char *buf);
 void serial_cb(const struct device *dev, void *user_data);
+uint8_t update_gpio_registers();
+void rotate_next();
+void go_to_position();
+
+
+// global vars - todo change to proper local
+unsigned int combined = 0x1F;  // 111110 in binary for Register A to start with five '1's
+const unsigned int maskA = 0x003F; // Mask for the lower 6 bits (0000000000111111)
+const unsigned int maskB = 0x0FC0; // Mask for the next 6 bits (0000111111000000)
+const unsigned int lastBitBMask = 0x0800; // 12th bit from LSB, the last bit of B
+unsigned int regA = 0, regB = 0, lastBitB = 0;
+// current position - middle director
+uint8_t current_pos = 8; // when combined starts as 0x1F
+uint8_t dest_pos = 8;
+
+
 
 int main(void)
 {
 	int err = 0;
+	char tx_buf[MSG_SIZE];
 
 	printk("entering main\n");
 	
+	// init i2c device
 	if (!device_is_ready(i2c0_device)){
 		printk("i2c device not ready\n\r");
 		return -1;
-	}
+	}	
 
-	char tx_buf[MSG_SIZE];
-
+	// init uart device
 	if (!device_is_ready(uart_dev)) {
 		printk("UART device not found!");
 		return 0;
@@ -83,47 +100,50 @@ int main(void)
 
 	printk("past uart enable\n");
 
-	unsigned int combined = 0x1F;  // 111110 in binary for Register A to start with five '1's
-    const unsigned int maskA = 0x003F; // Mask for the lower 6 bits (0000000000111111)
-    const unsigned int maskB = 0x0FC0; // Mask for the next 6 bits (0000111111000000)
-    const unsigned int lastBitBMask = 0x0800; // 12th bit from LSB, the last bit of B
+	rotate_next();
+	update_gpio_registers();
 
-	unsigned int regA = 0, regB = 0, lastBitB = 0;
 
 	while(k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0){	
 		printk(tx_buf);
 		printk("\r\n");
-
-		set_gpios_to_output();
-
-		//Update GPIO registers
-		//bank a			
-		i2c_buffer[0] = GPIOA_ADDR;
-		i2c_buffer[1] = regA;
-		err = i2c_write(i2c0_device, i2c_buffer, 2, CHIP_I2C_ADDR);
-		if (err != 0) continue;
 		
-		//bank b			
-		i2c_buffer[0] = GPIOB_ADDR;
-		i2c_buffer[1] = regB;
-		err = i2c_write(i2c0_device, i2c_buffer, 2, CHIP_I2C_ADDR);
-		if (err != 0) continue;
+		set_gpios_to_output();
+		update_gpio_registers();
 
+		if (strstr(tx_buf, "rotate") != NULL) {
+			printk("rotate X detected\r\n");			    
+			// Extract the value of X
+			const char *prefix = "rotate ";
+			const char *number_part = tx_buf + strlen(prefix);
+			dest_pos = (uint8_t)atoi(number_part);
+			printk("rotate to %d\r\n", dest_pos);
+			if (current_pos != dest_pos && dest_pos > 0 && dest_pos <= 12)
+				go_to_position();    
+		}
+		else if (strstr(tx_buf, "hold") != NULL){
+			printk("hold detected\r\n");
+			continue;
+		}
 
-		lastBitB = (combined & lastBitBMask) ? 1 : 0; // Check the last bit of B before shift
-        combined <<= 1;
-        // Wrap the last bit of B to the start of A if set
-        if (lastBitB) {
-            combined |= 0x01; // Set the first bit of A
-        }
-        // Extract A and B
-        regA = combined & maskA;
-        regB = (combined & maskB) >> 6; // Shift down to make it 6-bit
-
-		// now we're timed by argon
-		//k_msleep(SLEEP_TIME_MS);
+		// output the current position
+		printk("current pos: %d", current_pos);
 	}
+	return err;
+}
 
+uint8_t update_gpio_registers(){
+	uint8_t err = 0;
+	//bank a			
+	i2c_buffer[0] = GPIOA_ADDR;
+	i2c_buffer[1] = regA;
+	err = i2c_write(i2c0_device, i2c_buffer, 2, CHIP_I2C_ADDR);
+	if (err != 0) return err;	
+	//bank b			
+	i2c_buffer[0] = GPIOB_ADDR;
+	i2c_buffer[1] = regB;
+	err = i2c_write(i2c0_device, i2c_buffer, 2, CHIP_I2C_ADDR);
+	
 	return err;
 }
 
@@ -137,6 +157,38 @@ uint8_t set_gpios_to_output(){
 	i2c_write(i2c0_device, i2c_buffer, 2, CHIP_I2C_ADDR);
 }
 
+void rotate_next(){
+	if (current_pos<=11) current_pos++;
+	else current_pos = 1;
+	printk("rotating\r\n\n\n");	
+
+	lastBitB = (combined & lastBitBMask) ? 1 : 0; // Check the last bit of B before shift
+	combined <<= 1;
+	// Wrap the last bit of B to the start of A if set
+	if (lastBitB) {
+		combined |= 0x01; // Set the first bit of A
+	}
+	// Extract A and B
+	regA = combined & maskA;
+	regB = (combined & maskB) >> 6; // Shift down to make it 6-bit
+}
+
+void go_to_position(){
+	// set to initial position
+	// rotate next X times :)))
+	combined = 0x1F;  // 111110 in binary for Register A to start with five '1's
+	regA = 0; regB = 0; lastBitB = 0;
+	current_pos = 9;
+	rotate_next();
+
+	while(current_pos != dest_pos){
+		printk("in the while loop\r\n");
+		printk("current pos: %d, dest pos: %d\r\n", current_pos, dest_pos); 
+		rotate_next();
+	}
+
+	update_gpio_registers();
+}
 
 /*
  * Read characters from UART until line end is detected. Afterwards push the
