@@ -104,7 +104,8 @@ int main(void)
 	update_gpio_registers();
 
 
-	while(k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0){	
+	// while(k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0){	
+	while(0){		
 		printk(tx_buf);
 		printk("\r\n");
 		
@@ -129,6 +130,18 @@ int main(void)
 		// output the current position
 		printk("current pos: %d", current_pos);
 	}
+	
+	dest_pos = 5;
+	go_to_position();
+
+	while (1){
+		set_gpios_to_output();
+		update_gpio_registers();		
+		
+		// sleep
+	}
+	
+	
 	return err;
 }
 
